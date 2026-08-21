@@ -1,106 +1,77 @@
-# Stock Probability AI — MVP
+# Market Probability AI App
 
-This is a research/backtesting starter system. It estimates the probability that
-a stock's adjusted close will be at least a chosen percentage higher after a
-chosen number of trading days.
+A Streamlit app that trains a machine-learning model on historical stock data,
+calibrates its probabilities, tests it chronologically on unseen data, and scans
+the latest available prices.
 
-Default target:
-- Horizon: 5 trading days
-- Required return: +1%
-- Signal threshold: 65%
+## Start the app
 
-## Why this design
+Install Python 3.11+.
 
-The system deliberately separates history into three chronological blocks:
+### Windows
 
-1. **Training data** — fits the machine-learning model.
-2. **Calibration data** — converts raw model scores into more realistic probabilities.
-3. **Test data** — untouched until final evaluation.
+```powershell
+python -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+streamlit run app.py
+```
 
-That is much safer than randomly shuffling stock-market rows, which can create
-look-ahead leakage.
-
-## Install
-
-Python 3.11+ is recommended.
+### macOS / Linux
 
 ```bash
 python -m venv .venv
-
-# macOS/Linux
 source .venv/bin/activate
-
-# Windows PowerShell
-.venv\Scripts\Activate.ps1
-
 pip install -r requirements.txt
+streamlit run app.py
 ```
 
-## Run
+Your browser should open automatically.
 
-```bash
-python market_ai.py
-```
+## What the probability means
 
-The script will:
-- download historical adjusted daily prices;
-- calculate price, trend, momentum, volatility and volume features;
-- train a nonlinear classifier;
-- calibrate its probabilities on a later period;
-- evaluate on a still-later unseen test period;
-- print a calibration table;
-- scan the latest data;
-- save predictions to CSV.
+If your settings are:
+- target return = 1%
+- horizon = 5 days
 
-## Configure
+then a displayed probability of 70% means:
 
-Edit `config.py`.
+> Based on patterns learned from the historical dataset, the calibrated model
+> estimates a 70% chance the adjusted closing price will be at least 1% higher
+> five trading days later.
 
-Useful settings:
-- `TICKERS`
-- `HORIZON`
-- `TARGET_RETURN`
-- `SIGNAL_THRESHOLD`
-- `ROUND_TRIP_COST`
+It does **not** mean there is a guaranteed 70% chance of making money in a live
+trade.
 
-For ASX shares, Yahoo Finance normally uses `.AX`, for example `BHP.AX`,
-`CBA.AX`, and an Australian benchmark such as `^AXJO` can be used as the market
-ticker.
+## Included
 
-## How to judge whether the probability is useful
+- Historical price/volume download
+- Momentum features
+- Moving-average features
+- RSI
+- Volatility
+- Volume anomaly
+- Benchmark-market features
+- Chronological train/calibration/test split
+- Nonlinear machine-learning classifier
+- Probability calibration
+- Out-of-sample AUC, Brier score and accuracy
+- High-probability signal hit rate
+- Latest stock scanner
+- CSV export
 
-Do **not** judge the model by one winning trade.
+## Recommended next upgrades
 
-A probability model is useful only if its predictions remain calibrated out of
-sample. As an example, among a large number of predictions around 70%, the
-event should happen roughly 70% of the time.
+- Walk-forward retraining
+- Realistic trading costs and slippage
+- Stop-loss / take-profit outcome modeling
+- Portfolio sizing
+- Fundamentals
+- Earnings data
+- News sentiment
+- Options-market features
+- Sector relative strength
+- Paper-trading broker integration
+- User authentication and cloud deployment
 
-Also examine:
-- number of predictions in each probability bucket;
-- Brier score;
-- ROC AUC;
-- hit rate only on high-probability signals;
-- returns after realistic fees/slippage;
-- performance through different market regimes.
-
-## Important limitations
-
-- `yfinance` is convenient for prototyping, not an institutional execution feed.
-- Daily OHLCV alone may not contain enough predictive information for a durable edge.
-- The current backtest treats signals as observations, not a full portfolio with
-  capital constraints, overlapping positions, spreads, taxes and execution.
-- Historical performance does not guarantee future returns.
-- Do not connect this directly to real-money auto-trading before extensive
-  walk-forward and paper-trading validation.
-
-## Strong next upgrades
-
-1. Proper walk-forward portfolio backtest.
-2. Larger liquid-stock universe.
-3. Earnings/fundamental features.
-4. News/sentiment features.
-5. Relative strength and sector features.
-6. Regime detection.
-7. Broker/data-provider API.
-8. Paper-trading engine.
-9. Dashboard and alerts.
+This software is for research and education and is not financial advice.

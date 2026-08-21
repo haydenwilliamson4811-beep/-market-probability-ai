@@ -1,5 +1,5 @@
+streamlit>=1.40
 pandas>=2.2
 numpy>=1.26
 scikit-learn>=1.5
 yfinance>=0.2.54
-joblib>=1.4
