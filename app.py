@@ -1,7 +1,8 @@
+
 from __future__ import annotations
 
 import warnings
-warnings.filterwarnings('ignore')
+warnings.filterwarnings("ignore")
 
 import numpy as np
 import pandas as pd
@@ -9,278 +10,506 @@ import streamlit as st
 import yfinance as yf
 
 from sklearn.compose import ColumnTransformer
-from sklearn.ensemble import HistGradientBoostingClassifier, RandomForestRegressor, VotingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score, brier_score_loss, accuracy_score, mean_absolute_error
+from sklearn.metrics import roc_auc_score, brier_score_loss
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-st.set_page_config(page_title='Market Probability AI V2', page_icon='🧠', layout='wide')
-st.title('🧠 Market Probability AI V2')
-st.caption('Calibrated probabilities, expected return, downside risk and walk-forward validation. No model can guarantee profit.')
+st.set_page_config(
+    page_title="Market Probability AI V3",
+    page_icon="🎯",
+    layout="wide",
+)
 
-st.markdown('''
+st.markdown("""
 <style>
-.block-container {padding-top: 1.2rem; padding-bottom: 4rem;}
-.card {padding:16px;border-radius:16px;margin:10px 0;border:1px solid rgba(128,128,128,.25)}
-.buy {background:rgba(0,180,80,.10);border-color:rgba(0,180,80,.35)}
-.hold {background:rgba(255,180,0,.10);border-color:rgba(255,180,0,.35)}
-.avoid {background:rgba(220,60,60,.10);border-color:rgba(220,60,60,.35)}
-.big {font-size:1.9rem;font-weight:800}
+.block-container {padding-top:1.2rem;padding-bottom:4rem}
+.card {
+    padding:18px;border-radius:16px;border:1px solid rgba(120,120,120,.25);
+    margin-bottom:12px;
+}
+.good {background:rgba(0,170,80,.09)}
+.neutral {background:rgba(220,170,0,.08)}
+.bad {background:rgba(220,60,60,.08)}
+.big {font-size:1.85rem;font-weight:800}
 .small {opacity:.75;font-size:.9rem}
 </style>
-''', unsafe_allow_html=True)
+""", unsafe_allow_html=True)
 
-DEFAULT_TICKERS = 'AAPL, MSFT, NVDA, AMZN, META, GOOGL, TSLA, JPM, XOM, COST'
+st.title("🎯 Market Probability AI V3")
+st.caption(
+    "Per-stock, multi-horizon edge finder. It compares model probability against each stock's own "
+    "historical baseline and refuses to call a trade when the edge is weak."
+)
+
+DEFAULT_TICKERS = "AAPL, MSFT, NVDA, AMZN, META, GOOGL, JPM, COST"
+HORIZONS = [1, 3, 5, 10, 20]
 
 with st.sidebar:
-    st.header('Scanner settings')
-    ticker_text = st.text_area('Tickers', DEFAULT_TICKERS, height=120)
-    benchmark = st.text_input('Benchmark', 'SPY')
-    start_date = st.text_input('History start', '2012-01-01')
-    horizon = st.slider('Forecast horizon (trading days)', 1, 20, 5)
-    target_pct = st.slider('Profit target', 0.25, 10.0, 1.0, 0.25)
-    buy_prob_pct = st.slider('Minimum BUY probability', 50, 90, 65, 1)
-    min_exp_pct = st.slider('Minimum expected return for BUY', -1.0, 5.0, 0.5, 0.25)
-    max_down_pct = st.slider('Max downside probability for BUY', 10, 70, 45, 1)
-    run = st.button('Train V2 & Scan', type='primary', use_container_width=True)
-    st.divider()
-    st.caption('ASX examples: BHP.AX, CBA.AX, FMG.AX')
-    st.caption('Gold: GLD or GC=F')
-    st.caption('Crypto: BTC-USD')
-
-target_return = target_pct / 100
-buy_threshold = buy_prob_pct / 100
-min_expected = min_exp_pct / 100
-max_down = max_down_pct / 100
+    st.header("V3 settings")
+    ticker_text = st.text_area("Tickers", DEFAULT_TICKERS, height=120)
+    benchmark = st.text_input("Benchmark", "SPY")
+    start_date = st.text_input("History start", "2012-01-01")
+    target_mode = st.selectbox(
+        "Target type",
+        ["Volatility-adjusted", "Fixed %"],
+        index=0,
+    )
+    fixed_target_pct = st.slider("Fixed target %", 0.25, 5.0, 1.0, 0.25)
+    vol_target_mult = st.slider("Volatility target multiplier", 0.25, 1.50, 0.75, 0.05)
+    min_edge_pp = st.slider("Minimum edge over baseline (percentage points)", 2, 20, 6, 1)
+    min_wf_auc = st.slider("Minimum walk-forward AUC", 0.50, 0.70, 0.56, 0.01)
+    min_samples = st.slider("Minimum historical signal samples", 20, 300, 60, 10)
+    run = st.button("Find Real Edge", type="primary", use_container_width=True)
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def download(ticker: str, start: str) -> pd.DataFrame:
-    df = yf.download(ticker, start=start, auto_adjust=True, progress=False, actions=False, threads=False)
+def download(ticker, start):
+    df = yf.download(
+        ticker, start=start, auto_adjust=True,
+        progress=False, actions=False, threads=False
+    )
     if df.empty:
-        raise ValueError(f'No data returned for {ticker}')
+        raise ValueError(f"No data for {ticker}")
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = df.columns.get_level_values(0)
-    cols = ['Open','High','Low','Close','Volume']
+    cols = ["Open","High","Low","Close","Volume"]
     missing = [c for c in cols if c not in df.columns]
     if missing:
-        raise ValueError(f'{ticker} missing {missing}')
-    df = df[cols].copy()
-    df.index = pd.to_datetime(df.index).tz_localize(None)
-    return df
+        raise ValueError(f"Missing {missing}")
+    out = df[cols].copy()
+    out.index = pd.to_datetime(out.index).tz_localize(None)
+    return out
 
-def rsi(close: pd.Series, n=14):
-    d = close.diff()
+def rsi(s, n=14):
+    d = s.diff()
     up = d.clip(lower=0).ewm(alpha=1/n, adjust=False).mean()
     dn = (-d.clip(upper=0)).ewm(alpha=1/n, adjust=False).mean()
     rs = up / dn.replace(0, np.nan)
     return 100 - 100/(1+rs)
 
-def atr(df: pd.DataFrame, n=14):
-    prev = df['Close'].shift(1)
-    tr = pd.concat([(df['High']-df['Low']), (df['High']-prev).abs(), (df['Low']-prev).abs()], axis=1).max(axis=1)
+def atr(df, n=14):
+    prev = df["Close"].shift(1)
+    tr = pd.concat([
+        df["High"]-df["Low"],
+        (df["High"]-prev).abs(),
+        (df["Low"]-prev).abs()
+    ], axis=1).max(axis=1)
     return tr.rolling(n).mean()
 
 def zscore(s, n):
-    return (s-s.rolling(n).mean()) / s.rolling(n).std().replace(0, np.nan)
-
-def regime_series(market):
-    c = market['Close']
-    ma50 = c.rolling(50).mean(); ma200 = c.rolling(200).mean()
-    r20 = c.pct_change(20)
-    vol = c.pct_change().rolling(20).std()*np.sqrt(252)
-    q80 = vol.rolling(252).quantile(.80)
-    out = pd.Series('Neutral', index=market.index, dtype='object')
-    out[(c>ma200)&(ma50>ma200)&(r20>0)] = 'Bull'
-    out[(c<ma200)&(ma50<ma200)&(r20<0)] = 'Bear'
-    out[vol>q80] = 'High Volatility'
-    return out
-
-def features(price, market, ticker, include_target=True):
-    df = price.copy(); c = df['Close']; r1 = c.pct_change()
-    for n in [1,2,3,5,10,20,60,120]: df[f'ret_{n}'] = c.pct_change(n)
-    for n in [5,10,20,50,100,200]: df[f'ma_{n}_dist'] = c/c.rolling(n).mean()-1
-    df['trend_5_20'] = c.rolling(5).mean()/c.rolling(20).mean()-1
-    df['trend_20_50'] = c.rolling(20).mean()/c.rolling(50).mean()-1
-    df['trend_50_200'] = c.rolling(50).mean()/c.rolling(200).mean()-1
-    for n in [5,10,20,60]: df[f'vol_{n}'] = r1.rolling(n).std()*np.sqrt(252)
-    df['range_1'] = (df['High']-df['Low'])/c
-    df['gap_1'] = df['Open']/c.shift(1)-1
-    df['atr_14_pct'] = atr(df)/c
-    df['rsi_14'] = rsi(c,14); df['rsi_7'] = rsi(c,7)
-    df['drawdown_20'] = c/c.rolling(20).max()-1
-    df['drawdown_60'] = c/c.rolling(60).max()-1
-    df['breakout_20'] = c/c.rolling(20).max()
-    df['breakout_60'] = c/c.rolling(60).max()
-    df['volume_z_20'] = zscore(df['Volume'],20)
-    df['volume_z_60'] = zscore(df['Volume'],60)
-    df['price_z_20'] = zscore(c,20); df['price_z_60'] = zscore(c,60)
-
-    m = market.copy(); mc = m['Close']; mr = mc.pct_change()
-    m['market_ret_1'] = mc.pct_change(1); m['market_ret_5'] = mc.pct_change(5); m['market_ret_20'] = mc.pct_change(20)
-    m['market_vol_20'] = mr.rolling(20).std()*np.sqrt(252)
-    m['market_ma200_dist'] = mc/mc.rolling(200).mean()-1
-    m['market_rsi_14'] = rsi(mc,14)
-    df = df.join(m[['market_ret_1','market_ret_5','market_ret_20','market_vol_20','market_ma200_dist','market_rsi_14']], how='left')
-    df['rel_strength_5'] = df['ret_5']-df['market_ret_5']
-    df['rel_strength_20'] = df['ret_20']-df['market_ret_20']
-    reg = regime_series(market).reindex(df.index).fillna('Neutral')
-    df['regime'] = reg
-    df['regime_bull'] = (reg=='Bull').astype(int)
-    df['regime_bear'] = (reg=='Bear').astype(int)
-    df['regime_highvol'] = (reg=='High Volatility').astype(int)
-    df['ticker'] = ticker
-    if include_target:
-        fr = c.shift(-horizon)/c-1
-        df['future_return'] = fr
-        df['target_up'] = (fr>=target_return).astype(float)
-        df['target_down'] = (fr<=-target_return).astype(float)
-        df.loc[fr.isna(), ['target_up','target_down']] = np.nan
-    return df
+    m = s.rolling(n).mean()
+    sd = s.rolling(n).std()
+    return (s-m)/sd.replace(0,np.nan)
 
 FEATURES = [
-'ret_1','ret_2','ret_3','ret_5','ret_10','ret_20','ret_60','ret_120',
-'ma_5_dist','ma_10_dist','ma_20_dist','ma_50_dist','ma_100_dist','ma_200_dist',
-'trend_5_20','trend_20_50','trend_50_200','vol_5','vol_10','vol_20','vol_60',
-'range_1','gap_1','atr_14_pct','rsi_14','rsi_7','drawdown_20','drawdown_60',
-'breakout_20','breakout_60','volume_z_20','volume_z_60','price_z_20','price_z_60',
-'market_ret_1','market_ret_5','market_ret_20','market_vol_20','market_ma200_dist','market_rsi_14',
-'rel_strength_5','rel_strength_20','regime_bull','regime_bear','regime_highvol']
+    "ret1","ret3","ret5","ret10","ret20","ret60",
+    "ma10","ma20","ma50","ma200",
+    "vol10","vol20","vol60","atrp",
+    "rsi7","rsi14","pricez20","pricez60",
+    "volz20","dd20","dd60","break20",
+    "mkt1","mkt5","mkt20","mktvol20","mktma200",
+    "rs5","rs20"
+]
 
-def classifier():
-    prep = ColumnTransformer([('num', Pipeline([('imp',SimpleImputer(strategy='median')),('sc',StandardScaler())]), FEATURES)], remainder='drop')
-    lr = LogisticRegression(C=.5, max_iter=2000, class_weight='balanced', random_state=42)
-    hgb = HistGradientBoostingClassifier(learning_rate=.035, max_iter=350, max_leaf_nodes=15, min_samples_leaf=50, l2_regularization=2.0, random_state=42)
-    vote = VotingClassifier([('lr',lr),('hgb',hgb)], voting='soft', weights=[1,2])
-    return Pipeline([('prep',prep),('model',vote)])
+def features(px, market, horizon, target_mode, fixed_target, vol_mult, include_target=True):
+    df = px.copy()
+    c = df["Close"]
+    r = c.pct_change()
 
-def regressor():
-    prep = ColumnTransformer([('num',SimpleImputer(strategy='median'),FEATURES)], remainder='drop')
-    rf = RandomForestRegressor(n_estimators=300,max_depth=8,min_samples_leaf=20,max_features=.6,n_jobs=-1,random_state=42)
-    return Pipeline([('prep',prep),('model',rf)])
+    df["ret1"] = c.pct_change(1)
+    df["ret3"] = c.pct_change(3)
+    df["ret5"] = c.pct_change(5)
+    df["ret10"] = c.pct_change(10)
+    df["ret20"] = c.pct_change(20)
+    df["ret60"] = c.pct_change(60)
 
-def split(data):
-    dates = np.array(sorted(data.index.unique()))
-    d1 = dates[int(len(dates)*.65)]; d2 = dates[int(len(dates)*.80)]
-    return data[data.index<d1], data[(data.index>=d1)&(data.index<d2)], data[data.index>=d2]
+    for n in [10,20,50,200]:
+        df[f"ma{n}"] = c/c.rolling(n).mean()-1
 
-def fit_cal(base, X, y):
-    p = np.clip(base.predict_proba(X)[:,1],1e-6,1-1e-6)
-    z = np.log(p/(1-p)).reshape(-1,1)
-    cal = LogisticRegression(max_iter=1000,random_state=42).fit(z,y)
+    df["vol10"] = r.rolling(10).std()*np.sqrt(252)
+    df["vol20"] = r.rolling(20).std()*np.sqrt(252)
+    df["vol60"] = r.rolling(60).std()*np.sqrt(252)
+    df["atrp"] = atr(df,14)/c
+    df["rsi7"] = rsi(c,7)
+    df["rsi14"] = rsi(c,14)
+    df["pricez20"] = zscore(c,20)
+    df["pricez60"] = zscore(c,60)
+    df["volz20"] = zscore(df["Volume"],20)
+    df["dd20"] = c/c.rolling(20).max()-1
+    df["dd60"] = c/c.rolling(60).max()-1
+    df["break20"] = c/c.rolling(20).max()
+
+    m = market.copy()
+    mc = m["Close"]
+    mr = mc.pct_change()
+    m["mkt1"] = mc.pct_change(1)
+    m["mkt5"] = mc.pct_change(5)
+    m["mkt20"] = mc.pct_change(20)
+    m["mktvol20"] = mr.rolling(20).std()*np.sqrt(252)
+    m["mktma200"] = mc/mc.rolling(200).mean()-1
+    df = df.join(m[["mkt1","mkt5","mkt20","mktvol20","mktma200"]], how="left")
+
+    df["rs5"] = df["ret5"] - df["mkt5"]
+    df["rs20"] = df["ret20"] - df["mkt20"]
+
+    if include_target:
+        fwd = c.shift(-horizon)/c - 1
+        if target_mode == "Fixed %":
+            req = pd.Series(fixed_target, index=df.index)
+        else:
+            # Scale the required move to current volatility and horizon.
+            # Uses only contemporaneous ATR, avoiding future information.
+            req = (df["atrp"] * np.sqrt(max(horizon,1)) * vol_mult).clip(lower=0.0025)
+
+        df["required_return"] = req
+        df["future_return"] = fwd
+        df["target"] = (fwd >= req).astype(float)
+        df.loc[fwd.isna(), "target"] = np.nan
+
+    return df
+
+def make_model():
+    prep = ColumnTransformer(
+        [("num", Pipeline([
+            ("imp", SimpleImputer(strategy="median")),
+            ("scale", StandardScaler())
+        ]), FEATURES)],
+        remainder="drop"
+    )
+    clf = LogisticRegression(
+        C=0.6, max_iter=2000, class_weight="balanced", random_state=42
+    )
+    return Pipeline([("prep",prep),("clf",clf)])
+
+def make_nonlinear():
+    prep = ColumnTransformer(
+        [("num", SimpleImputer(strategy="median"), FEATURES)],
+        remainder="drop"
+    )
+    clf = HistGradientBoostingClassifier(
+        learning_rate=0.04,
+        max_iter=250,
+        max_leaf_nodes=15,
+        min_samples_leaf=35,
+        l2_regularization=2.0,
+        random_state=42
+    )
+    return Pipeline([("prep",prep),("clf",clf)])
+
+def recency_weights(index):
+    # Half-life ~2 years of trading days.
+    n = len(index)
+    if n == 0:
+        return np.array([])
+    age = np.arange(n-1, -1, -1)
+    return np.power(0.5, age/504)
+
+def ensemble_fit(train):
+    m1 = make_model()
+    m2 = make_nonlinear()
+    # sklearn Pipeline supports fit params routed to final estimator.
+    w = recency_weights(train.index)
+    try:
+        m1.fit(train[FEATURES], train["target"], clf__sample_weight=w)
+    except Exception:
+        m1.fit(train[FEATURES], train["target"])
+    try:
+        m2.fit(train[FEATURES], train["target"], clf__sample_weight=w)
+    except Exception:
+        m2.fit(train[FEATURES], train["target"])
+    return m1, m2
+
+def ensemble_prob(models, X):
+    p1 = models[0].predict_proba(X[FEATURES])[:,1]
+    p2 = models[1].predict_proba(X[FEATURES])[:,1]
+    return 0.45*p1 + 0.55*p2
+
+def calibrate(raw_p, y):
+    raw_p = np.clip(raw_p,1e-6,1-1e-6)
+    z = np.log(raw_p/(1-raw_p)).reshape(-1,1)
+    cal = LogisticRegression(max_iter=1000)
+    cal.fit(z,y)
     return cal
 
-def cal_prob(base, cal, X):
-    p = np.clip(base.predict_proba(X)[:,1],1e-6,1-1e-6)
-    z = np.log(p/(1-p)).reshape(-1,1)
+def apply_cal(cal, raw_p):
+    raw_p = np.clip(raw_p,1e-6,1-1e-6)
+    z = np.log(raw_p/(1-raw_p)).reshape(-1,1)
     return cal.predict_proba(z)[:,1]
 
-def walk_forward(data, folds=4):
-    dates = np.array(sorted(data.index.unique()))
-    if len(dates)<800: return np.nan, []
-    cuts = np.linspace(.55,.90,folds+1); scores=[]
+def split_dates(df):
+    dates = np.array(sorted(df.index.unique()))
+    tr = dates[int(len(dates)*0.60)]
+    ca = dates[int(len(dates)*0.75)]
+    return (
+        df[df.index < tr].copy(),
+        df[(df.index >= tr)&(df.index < ca)].copy(),
+        df[df.index >= ca].copy(),
+    )
+
+def walk_forward(df, folds=4):
+    dates = np.array(sorted(df.index.unique()))
+    if len(dates) < 700:
+        return np.nan, 0, np.nan
+    bounds = np.linspace(.50,.90,folds+1)
+    aucs = []
+    signal_hits = []
+    signal_count = 0
+
     for i in range(folds):
-        a=dates[int(len(dates)*cuts[i])]; b=dates[int(len(dates)*cuts[i+1])]
-        tr=data[data.index<a]; te=data[(data.index>=a)&(data.index<b)]
-        if len(tr)<1000 or len(te)<100: continue
+        train_end = dates[int(len(dates)*bounds[i])]
+        test_end = dates[int(len(dates)*bounds[i+1])]
+        tr = df[df.index < train_end]
+        te = df[(df.index >= train_end)&(df.index < test_end)]
+        if len(tr) < 400 or len(te) < 80:
+            continue
         try:
-            m=classifier().fit(tr[FEATURES],tr['target_up'])
-            scores.append(roc_auc_score(te['target_up'],m.predict_proba(te[FEATURES])[:,1]))
-        except Exception: pass
-    return (float(np.mean(scores)) if scores else np.nan), scores
+            models = ensemble_fit(tr)
+            p = ensemble_prob(models, te)
+            aucs.append(roc_auc_score(te["target"],p))
+            baseline = tr["target"].mean()
+            edge = p - baseline
+            sel = edge >= 0.06
+            if sel.any():
+                signal_hits.extend(te.loc[sel,"target"].tolist())
+                signal_count += int(sel.sum())
+        except Exception:
+            pass
 
-def signal(prob, down, exp):
-    if prob>=buy_threshold and down<=max_down and exp>=min_expected: return 'BUY'
-    if prob>=.50 and exp>-0.002: return 'HOLD'
-    return 'AVOID'
+    return (
+        float(np.mean(aucs)) if aucs else np.nan,
+        signal_count,
+        float(np.mean(signal_hits)) if signal_hits else np.nan
+    )
 
-def confidence(prob, down, exp, auc):
-    s=max(0,prob-.5)*3 + max(0,prob-down)*1.5 + max(0,exp)*8 + max(0,auc-.5)*2.5
-    return 'High' if s>=.75 else 'Moderate' if s>=.40 else 'Low'
+def evaluate_one(ticker, px, market, horizon, target_mode, fixed_target, vol_mult):
+    df = features(px,market,horizon,target_mode,fixed_target,vol_mult,True)
+    df = df.dropna(subset=FEATURES+["target","future_return","required_return"])
+    df["target"] = df["target"].astype(int)
+    if len(df) < 900:
+        return None
 
-st.info(f'Target: at least **{target_pct:.2f}% higher in {horizon} trading days**. BUY also requires expected return ≥ **{min_exp_pct:.2f}%** and downside probability ≤ **{max_down_pct}%**.')
+    train, calib, test = split_dates(df)
+    if min(train["target"].nunique(),calib["target"].nunique(),test["target"].nunique()) < 2:
+        return None
+
+    models = ensemble_fit(train)
+    raw_cal = ensemble_prob(models, calib)
+    cal = calibrate(raw_cal, calib["target"])
+    p_test = apply_cal(cal, ensemble_prob(models,test))
+
+    baseline = float(pd.concat([train,calib])["target"].mean())
+    auc = float(roc_auc_score(test["target"],p_test))
+    brier = float(brier_score_loss(test["target"],p_test))
+
+    wf_auc, wf_signals, wf_hit = walk_forward(df, folds=4)
+
+    latestf = features(px,market,horizon,target_mode,fixed_target,vol_mult,False)
+    latestf = latestf.dropna(subset=FEATURES)
+    if latestf.empty:
+        return None
+    latest = latestf.iloc[[-1]]
+    current_p = float(apply_cal(cal, ensemble_prob(models,latest))[0])
+    edge = current_p - baseline
+
+    # Historical test signals at same or greater edge.
+    test_edge = p_test - baseline
+    comparable = test[test_edge >= max(edge-0.01, 0.0)].copy()
+    comp_count = len(comparable)
+    comp_hit = float(comparable["target"].mean()) if comp_count else np.nan
+    comp_ret = float(comparable["future_return"].mean()) if comp_count else np.nan
+
+    return {
+        "ticker": ticker,
+        "horizon": horizon,
+        "prob": current_p,
+        "baseline": baseline,
+        "edge": edge,
+        "auc": auc,
+        "brier": brier,
+        "wf_auc": wf_auc,
+        "wf_signals": wf_signals,
+        "wf_hit": wf_hit,
+        "samples": comp_count,
+        "historical_hit": comp_hit,
+        "historical_return": comp_ret,
+        "close": float(latest["Close"].iloc[0]),
+        "rsi": float(latest["rsi14"].iloc[0]),
+        "atrp": float(latest["atrp"].iloc[0]),
+        "date": latest.index[0].date().isoformat(),
+    }
+
+def verdict(row):
+    required_edge = min_edge_pp/100
+    enough = row["samples"] >= min_samples
+    wf_ok = not np.isnan(row["wf_auc"]) and row["wf_auc"] >= min_wf_auc
+    edge_ok = row["edge"] >= required_edge
+    auc_ok = row["auc"] >= 0.54
+
+    if edge_ok and wf_ok and enough and auc_ok:
+        return "LONG SETUP"
+    if row["edge"] > 0 and row["auc"] >= 0.52:
+        return "WATCH"
+    return "NO TRADE"
 
 if run:
-    tickers=[x.strip().upper() for x in ticker_text.split(',') if x.strip()]
-    if not tickers: st.error('Enter at least one ticker.'); st.stop()
-    bar=st.progress(0,text='Downloading benchmark...')
-    try: market=download(benchmark.upper(),start_date)
-    except Exception as e: st.error(f'Benchmark failed: {e}'); st.stop()
-    frames=[]; raw={}; errors=[]
-    for i,t in enumerate(tickers,1):
-        bar.progress(min(.45,i/max(len(tickers),1)*.45),text=f'Loading {t}...')
+    tickers = [x.strip().upper() for x in ticker_text.split(",") if x.strip()]
+    if not tickers:
+        st.error("Enter at least one ticker.")
+        st.stop()
+
+    fixed_target = fixed_target_pct/100
+    progress = st.progress(0, text="Loading benchmark...")
+    try:
+        market = download(benchmark.upper(), start_date)
+    except Exception as e:
+        st.error(f"Benchmark failed: {e}")
+        st.stop()
+
+    results = []
+    errors = []
+
+    total_jobs = max(len(tickers)*len(HORIZONS),1)
+    job = 0
+
+    for ticker in tickers:
         try:
-            px=download(t,start_date); raw[t]=px; frames.append(features(px,market,t,True))
-        except Exception as e: errors.append(f'{t}: {e}')
-    if not frames: st.error('No usable ticker data was downloaded.'); st.stop()
-    data=pd.concat(frames).sort_index().dropna(subset=FEATURES+['target_up','target_down','future_return'])
-    data['target_up']=data['target_up'].astype(int); data['target_down']=data['target_down'].astype(int)
-    if len(data.index.unique())<700: st.error('Not enough history. Use an earlier start date.'); st.stop()
-    train,calib,test=split(data)
+            px = download(ticker,start_date)
+        except Exception as e:
+            errors.append(f"{ticker}: {e}")
+            continue
 
-    bar.progress(.55,text='Training upside ensemble...')
-    up=classifier().fit(train[FEATURES],train['target_up']); upcal=fit_cal(up,calib[FEATURES],calib['target_up'])
-    bar.progress(.65,text='Training downside ensemble...')
-    dn=classifier().fit(train[FEATURES],train['target_down']); dncal=fit_cal(dn,calib[FEATURES],calib['target_down'])
-    bar.progress(.75,text='Training expected-return model...')
-    reg=regressor().fit(pd.concat([train,calib])[FEATURES],pd.concat([train,calib])['future_return'])
+        per_ticker = []
+        for horizon in HORIZONS:
+            job += 1
+            progress.progress(
+                min(job/total_jobs*.95,.95),
+                text=f"Testing {ticker} — {horizon} day horizon..."
+            )
+            try:
+                r = evaluate_one(
+                    ticker,px,market,horizon,
+                    target_mode,fixed_target,vol_target_mult
+                )
+                if r:
+                    per_ticker.append(r)
+            except Exception as e:
+                errors.append(f"{ticker} {horizon}d: {e}")
 
-    test=test.copy(); test['up_prob']=cal_prob(up,upcal,test[FEATURES]); test['down_prob']=cal_prob(dn,dncal,test[FEATURES]); test['expected_return']=reg.predict(test[FEATURES])
-    auc=roc_auc_score(test['target_up'],test['up_prob']); brier=brier_score_loss(test['target_up'],test['up_prob']); acc=accuracy_score(test['target_up'],(test['up_prob']>=.5).astype(int)); mae=mean_absolute_error(test['future_return'],test['expected_return'])
-    wf_auc,wf=walk_forward(data)
-    test['signal']=[signal(p,d,e) for p,d,e in zip(test['up_prob'],test['down_prob'],test['expected_return'])]
-    buys=test[test['signal']=='BUY']; buy_hit=buys['target_up'].mean() if len(buys) else np.nan; buy_ret=buys['future_return'].mean() if len(buys) else np.nan
+        if per_ticker:
+            # Choose the best horizon using walk-forward AUC first, then current edge.
+            best = sorted(
+                per_ticker,
+                key=lambda x: (
+                    -999 if np.isnan(x["wf_auc"]) else x["wf_auc"],
+                    x["auc"],
+                    x["edge"]
+                ),
+                reverse=True
+            )[0]
+            best["verdict"] = verdict(best)
+            results.append(best)
 
-    bar.progress(.90,text='Scanning latest market state...')
-    rows=[]
-    for t,px in raw.items():
-        f=features(px,market,t,False).dropna(subset=FEATURES)
-        if f.empty: continue
-        x=f.iloc[[-1]]; p=float(cal_prob(up,upcal,x[FEATURES])[0]); d=float(cal_prob(dn,dncal,x[FEATURES])[0]); e=float(reg.predict(x[FEATURES])[0])
-        sig=signal(p,d,e); conf=confidence(p,d,e,auc); atrp=float(x['atr_14_pct'].iloc[0]); stop=-max(atrp*1.5,.01); take=max(target_return,abs(stop)*1.5)
-        rows.append({'Ticker':t,'Signal':sig,'Profit probability':p,'Downside probability':d,'Expected return':e,'Confidence':conf,'Regime':str(x['regime'].iloc[0]),'RSI':float(x['rsi_14'].iloc[0]),'Close':float(x['Close'].iloc[0]),'Research stop %':stop,'Research take-profit %':take,'Model edge':p-d})
-    scan=pd.DataFrame(rows)
-    if scan.empty: st.error('No latest scan results.'); st.stop()
-    order={'BUY':0,'HOLD':1,'AVOID':2}; scan['_o']=scan['Signal'].map(order); scan=scan.sort_values(['_o','Profit probability','Expected return'],ascending=[True,False,False]).drop(columns='_o')
-    bar.progress(1.0,text='Done')
+    progress.progress(1.0, text="Done")
 
-    st.subheader('Model validation')
-    a,b,c,d=st.columns(4); a.metric('Out-of-sample ROC AUC',f'{auc:.3f}'); b.metric('Walk-forward ROC AUC','N/A' if np.isnan(wf_auc) else f'{wf_auc:.3f}'); c.metric('Brier score',f'{brier:.3f}'); d.metric('Return MAE',f'{mae:.2%}')
-    a,b,c=st.columns(3); a.metric('Accuracy',f'{acc:.1%}'); b.metric('Historical BUY signals',f'{len(buys):,}'); c.metric('BUY hit rate','N/A' if np.isnan(buy_hit) else f'{buy_hit:.1%}')
-    if not np.isnan(buy_ret): st.caption(f'Average realized {horizon}-day return on historical BUY signals: {buy_ret:.2%}')
-    if auc<.55: st.warning('Current predictive power is weak. Treat signals as research only.')
-    elif auc<.62: st.info('Current predictive power is modest. Keep validating before trusting live signals.')
-    else: st.success('Stronger out-of-sample discrimination detected. Continue paper-trading before real-money use.')
+    if not results:
+        st.error("No models could be validated.")
+        st.stop()
 
-    st.subheader('Latest AI scanner')
-    for _,r in scan.iterrows():
-        cls='buy' if r['Signal']=='BUY' else 'hold' if r['Signal']=='HOLD' else 'avoid'; icon='🟢' if r['Signal']=='BUY' else '🟡' if r['Signal']=='HOLD' else '🔴'
-        st.markdown(f'''<div class="card {cls}"><b>{icon} {r['Ticker']} — {r['Signal']}</b><div class="big">{r['Profit probability']:.1%} profit probability</div><div>Expected return: <b>{r['Expected return']:.2%}</b> &nbsp; | &nbsp; Downside probability: <b>{r['Downside probability']:.1%}</b></div><div>Confidence: <b>{r['Confidence']}</b> &nbsp; | &nbsp; Regime: <b>{r['Regime']}</b> &nbsp; | &nbsp; RSI: <b>{r['RSI']:.1f}</b></div><div class="small">Model edge: {r['Model edge']:.1%} • Research stop: {r['Research stop %']:.2%} • Research take-profit: {r['Research take-profit %']:.2%}</div></div>''',unsafe_allow_html=True)
+    res = pd.DataFrame(results)
+    order = {"LONG SETUP":0,"WATCH":1,"NO TRADE":2}
+    res["_o"] = res["verdict"].map(order)
+    res = res.sort_values(
+        ["_o","edge","wf_auc"],
+        ascending=[True,False,False]
+    ).drop(columns="_o")
 
-    st.subheader('Full scanner table')
-    table=scan.copy()
-    for col in ['Profit probability','Downside probability','Expected return','Research stop %','Research take-profit %','Model edge']: table[col]=table[col].map(lambda x:f'{x:.2%}')
-    table['Close']=table['Close'].map(lambda x:f'{x:,.2f}'); table['RSI']=table['RSI'].map(lambda x:f'{x:.1f}')
-    st.dataframe(table,use_container_width=True,hide_index=True)
-    st.download_button('Download V2 scan CSV',scan.to_csv(index=False).encode(),'market_probability_ai_v2_scan.csv','text/csv')
+    longs = int((res["verdict"]=="LONG SETUP").sum())
+    st.subheader("Today's decision")
+    if longs == 0:
+        st.warning("NO TRADE TODAY — none of the tested stocks passed the V3 evidence thresholds.")
+    else:
+        st.success(f"{longs} stock(s) passed the V3 evidence thresholds.")
 
-    st.subheader('Probability calibration')
-    cal=test.copy(); cal['bucket']=pd.cut(cal['up_prob'],bins=np.linspace(0,1,11),include_lowest=True)
-    out=cal.groupby('bucket',observed=False).agg(Predictions=('target_up','size'),Avg_predicted_probability=('up_prob','mean'),Actual_success_rate=('target_up','mean'),Avg_realized_return=('future_return','mean')).reset_index()
-    st.dataframe(out,use_container_width=True,hide_index=True)
-    with st.expander('Walk-forward fold scores'):
-        st.write(pd.DataFrame({'Fold':range(1,len(wf)+1),'ROC AUC':wf}) if wf else 'Not enough history for fold scores.')
+    st.subheader("Best validated setup per stock")
+
+    for _,row in res.iterrows():
+        cls = "good" if row["verdict"]=="LONG SETUP" else "neutral" if row["verdict"]=="WATCH" else "bad"
+        icon = "🟢" if row["verdict"]=="LONG SETUP" else "🟡" if row["verdict"]=="WATCH" else "🔴"
+        wf = "N/A" if np.isnan(row["wf_auc"]) else f"{row['wf_auc']:.3f}"
+        hhit = "N/A" if np.isnan(row["historical_hit"]) else f"{row['historical_hit']:.1%}"
+        hret = "N/A" if np.isnan(row["historical_return"]) else f"{row['historical_return']:.2%}"
+
+        st.markdown(f"""
+        <div class="card {cls}">
+          <div style="font-size:1.25rem;font-weight:750">{icon} {row['ticker']} — {row['verdict']}</div>
+          <div class="big">{row['prob']:.1%} model probability</div>
+          <div>Historical baseline: <b>{row['baseline']:.1%}</b> &nbsp; | &nbsp;
+               Edge: <b>{row['edge']*100:.1f} percentage points</b></div>
+          <div>Best horizon: <b>{int(row['horizon'])} days</b> &nbsp; | &nbsp;
+               Walk-forward AUC: <b>{wf}</b> &nbsp; | &nbsp;
+               Test AUC: <b>{row['auc']:.3f}</b></div>
+          <div>Comparable historical signals: <b>{int(row['samples'])}</b> &nbsp; | &nbsp;
+               Hit rate: <b>{hhit}</b> &nbsp; | &nbsp;
+               Avg realized return: <b>{hret}</b></div>
+          <div class="small">Close {row['close']:.2f} • RSI {row['rsi']:.1f} • ATR {row['atrp']:.2%} • {row['date']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+    st.subheader("Validation table")
+    table = res.copy()
+    table["Probability"] = table["prob"].map(lambda x:f"{x:.1%}")
+    table["Baseline"] = table["baseline"].map(lambda x:f"{x:.1%}")
+    table["Edge"] = table["edge"].map(lambda x:f"{x*100:.1f} pp")
+    table["WF AUC"] = table["wf_auc"].map(lambda x:"N/A" if np.isnan(x) else f"{x:.3f}")
+    table["Test AUC"] = table["auc"].map(lambda x:f"{x:.3f}")
+    table["Hit rate"] = table["historical_hit"].map(lambda x:"N/A" if np.isnan(x) else f"{x:.1%}")
+    show = table[[
+        "ticker","verdict","horizon","Probability","Baseline","Edge",
+        "WF AUC","Test AUC","samples","Hit rate"
+    ]].rename(columns={"ticker":"Ticker","verdict":"Decision","horizon":"Best horizon"})
+    st.dataframe(show,use_container_width=True,hide_index=True)
+
+    st.download_button(
+        "Download V3 results CSV",
+        data=res.to_csv(index=False).encode("utf-8"),
+        file_name="market_probability_ai_v3_results.csv",
+        mime="text/csv"
+    )
+
     if errors:
-        with st.expander('Ticker warnings'):
-            for e in errors: st.write(e)
-    st.warning('BUY is not a guarantee. Real trading also requires execution costs, slippage, position sizing, portfolio limits, tax considerations and live paper-trading validation.')
+        with st.expander("Warnings"):
+            for e in errors:
+                st.write(e)
+
+    st.warning(
+        "V3 is deliberately conservative. A LONG SETUP is still not a guarantee. "
+        "Before real-money trading, add fees/slippage, portfolio sizing and paper trading."
+    )
+
 else:
-    st.markdown('''
-### What V2 improves
-This version combines multiple model types and refuses to call something a BUY unless **probability, expected return and downside risk** agree.
+    st.markdown("""
+### What V3 changes
 
-It adds stronger momentum, trend, volatility, ATR, drawdown, breakout, relative-strength, market-regime and volume features, plus **walk-forward validation** so the app is harder to fool with one lucky historical period.
+V3 no longer asks one model to predict everything.
 
-A good first test is `AAPL, MSFT, NVDA, AMZN, META, GOOGL, JPM, COST` with a 5-day horizon and 1% target.
-''')
+For every stock it:
+- trains a separate model;
+- tests 1, 3, 5, 10 and 20-day horizons;
+- chooses the horizon with the best walk-forward evidence;
+- compares the current probability with that stock's historical baseline;
+- weights recent market history more heavily;
+- checks how similar historical high-edge signals actually performed;
+- says **NO TRADE** when the evidence is weak.
+
+The key number is now **edge over baseline**, not raw probability.
+
+Example:
+
+> Model probability: 61%  
+> Stock's historical baseline: 48%  
+> Edge: +13 percentage points
+
+That is more meaningful than simply displaying “61%” by itself.
+""")
